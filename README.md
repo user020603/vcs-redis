@@ -292,4 +292,5 @@ Redis cung cấp các cơ chế để tăng cường tính sẵn sàng (high ava
     - `ZRANGE key start stop`: Lấy các phần tử trong khoảng rank.  
     **Độ phức tạp**: O(log(N) + M), với M là số phần tử được trả về.
 
-    - `ZRANGE key member`
+    *   `ZRANK key member`: Lấy thứ hạng (rank, bắt đầu từ 0) của phần tử (sắp xếp tăng dần theo score).
+    **Độ phức tạp**: O(log(N)), với N là số phần tử trong sorted set.
