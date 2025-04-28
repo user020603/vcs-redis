@@ -137,3 +137,159 @@ Redis nổi bật nhờ hỗ trợ nhiều loại cấu trúc dữ liệu, cho p
     *   Lệnh chính: `XADD` (thêm entry), `XRANGE`, `XREVRANGE` (đọc entries), `XLEN`, `XREAD` (đọc blocking), `XGROUP` (quản lý consumer groups), `XREADGROUP` (đọc bởi consumer group), `XACK` (xác nhận đã xử lý).
 
 ## 4. Redis Event Loop
+
+Redis sử dụng mô hình **single-threaded event loop** để xử lý request, giúp đạt hiệu năng cao và tránh các vấn đề của đa luồng. 
+
+**Cách Redis xử lý request với một luồng**
+
+1. **Nhận dữ liệu từ client**: Redis server lắng nghe các kết nối đến trên một hoặc nhiều cổng mạng (sockets). Khi một client kết nối hoặc gửi dữ liệu, socket tương ứng trở nên "readable".
+2. **I/O Multiplexing**: Redis sử dụng cơ chế I/O multiplexing của hệ điều hành (`epoll` trên Linux, `kqueue` trên MacOS). Thay vì tạo một luồng riêng cho mỗi client hoặc liên tục kiểm tra từng cổng socket (polling), Redis đăng ký tất cả các socket đang mở với kernel thông qua I/O multiplexing API. Redis chỉ cần gọi một hàm duy nhất (vd: `epoll_wait`) để đợi cho đến khi có bất kỳ socket nào sẵng sàng cho việc đọc (nếu có dữ liệu đến) hoặc ghi (buffer ghi trống). Hàm này sẽ block cho đến khi có sự kiện xảy ra hoặc timeout.
+3. **Event Dispatcher**: Khi hàm I/O multiplexing trả về danh sách các socket có sự kiện, event loop sẽ duyệt qua danh sách này.
+4. **File Event Handler (Đọc)**: Nếu sự kiện là "readable" (có dữ liệu từ client), Redis đọc dữ liệu từ socket vào buffer. Nó phân tích dữ liệu này để xác định lệnh Redis mà client yêu cầu. 
+5. **Xử lý lệnh**: Lệnh được thực thi. Vì hầu hết lệnh Redis thao tác trên RAM và được tối ưu cao, chúng thực thi rất nhanh.
+6. **File Event Handler (Ghi)**: Sau khi thực thi lệnh và có kết quả, Redis cần gửi kết quả về client. Nó ghi kết quả vào buffer ghi của socket tương ứng. Nếu buffer đầy, Redis sẽ đăng ký sự kiện "writable" cho socket đó với I/O multiplexing. Khi socket sẵn sàng để ghi (buffer trống), event loop sẽ được thông báo.
+7. **Gửi kết quả về client**: Khi sự kiện "writable" xảy ra, Redis tiến hành ghi dữ liệu từ buffer của nó vào socket để gửi về client. 
+8. **Time Event Handler**: Ngoài các sự kiện I/O (file events), event loop cũng xử lý các sự kiện hẹn giờ (time events), ví dụ như kiểm tra key hết hạn (expire), thực hiện snapshot RDB định kỳ, AOF rewrite, v.v.
+
+**Cơ chế cốt lõi**
+- **Socket**: Giao diện mạng chuẩn để giao tiếp client - server.
+- **I/O Multiplexing**: Cho phép một luồng duy nhất giám sát nhiều kênh I/O (sockets) cùng lúc và chỉ xử lý những kênh đã sẵn sàng, tránh lãng phí CPU cho việc kiểm tra các kênh không hoạt động. Đây cũng là chìa khóa cho khả năng xử lý hàng nghìn kết nối đồng thời của Redis trên một luồng. 
+- **Event-Driven Architecture**: Thay vì chờ đợi một tác vụ hoàn thành, Redis phản ứng với các sự kiện (dữ liệu đến, socket sẵn sàng ghi, timer hết hạn). Event loop là trung tâm điều phối các sự kiện này đến các trình xử lý (handlers) tương ứng.
+
+Mô hình này là hiệu quả vì các thao tác Redis thường là non-blocking. Tuy nhiên cũng có rủi ro khi một lệnh chạy quá lâu (có thể do phức tạp hoặc sử dụng `pipeline`) có thể dẫn đến block event loop. 
+
+## 5. Replication & Clustering (Sao chép và phân cụm)
+
+Redis cung cấp các cơ chế để tăng cường tính sẵn sàng (high availability), khả năng đọc (read scalability) và khả năng ghi/lưu trữ (write/storage scalability).
+
+**Replication (Master-Slave)**
+
+- **Mục đích**: Sao chép dữ liệu từ một node Redis (Master) sang một hoặc nhiều node Redis khác (Slaves/Replicas).
+- **Cách hoạt động**: 
+    - Slave kết nối đến Master và gửi lệnh `PSYNC` (hoặc `SYNC` cho lần đầu).
+    - Master bắt đầu quá trình BGSAVE để tạo snapshot RDB. Trong lúc này, nó buffer các lệnh ghi mới.
+    - Master gửi file RDB cho Slave.
+    - Slave xóa dữ liệu cũ (nếu có) và tải dữ liệu từ RDB. 
+    - Master gửi các lệnh ghi đã buffer trong lúc tạo RDB cho slave.
+    - Từ đó về sau, mỗi khi Master thực thi một lệnh ghi, nó sẽ gửi lệnh đó đến tất cả các Slave đang kết nối để chúng thực thi và duy trì trạng thái đồng bộ. Quá trình này là không đồng bộ (asynchronous).
+- **Lợi ích**
+    - **High Availability**: Nếu Master chết, một Slave có thể được thăng cấp (promoted) thành Master mới (quản lý bởi Redis Sentinel), giảm thiểu thời gian downtime.
+    - **Read Scalability**: Các request đọc có thể được phân phối đến các Slave, giảm tải cho Master.
+- Cấu hình: Sử dụng lệnh `REPLICAOF <master_ip> <master_port>` trên node Slave.
+
+**Redis Cluster**
+
+- **Mục đích**: Phân tán dữ liệu (sharding) và xử lý request trên nhiều node Redis, cho phép mở rộng cả dung lượng lưu trữ và khả năng ghi/đọc vượt quá giới hạn của một node đơn lẻ. 
+
+- **Cách hoạt động**
+    - **Data sharding**: Không gian key (keyspace) được chia thành **16,384 slot (hash slots)**.
+    - Mỗi Master node trong cluster này chịu trách nghiệm quản lý một tập hợp các slot này.
+    - Để xác định một key thuộc slot nào, Redis Cluster tính toán CRC16 của key và lấy modulo 16384: `slot = CRC16(key) % 16384`.
+    - Khi client gửi lệnh đến một node, node đó sẽ tính toán slot của key. 
+        - Nếu slot đó thuộc về node hiện tại, nó xử lý lệnh.
+        - Nếu slot thuộc về một node khác, nó trả về một lỗi chuyển hướng (`MOVED error`) cho client, kèm theo địa chỉ của node đúng. Client sẽ cache lại map slot-node và tự động gửi request đến node đúng trong các lần sau. 
+
+- **Ưu điểm**
+    - **Scalability**: Cho phép mở rộng hệ thống Redis về dung lượng và thông lượng bằng cách thêm node. 
+    - **High Availability**: Tích hợp sẵn cơ chế failover tự động. 
+
+- **Nhược điểm**
+    - Phức tạp hơn trong quản lý và vận hành so với setup đơn lẻ hoặc Master-Slave.
+    - Các thao tác trên nhiều key (multi-key operations) chỉ được hỗ trợ nếu tất cả các key đó nằm cùng một slot (có thể dùng hash tags `{...}` để đảm bảo). Các thao tác cross-slot phức tạp hơn hoặc không hỗ trợ trực tiếp. 
+    - Client cần hỗ trợ Redis Cluster protocol. 
+
+**Redis Sentinel**
+*   **Mục đích:** Cung cấp một giải pháp **high availability** cho kiến trúc **Redis Master-Slave** (không phải Redis Cluster). Sentinel là một hệ thống riêng biệt chạy song song với các node Redis Master/Slave.
+*   **Chức năng chính:**
+    *   **Monitoring (Giám sát):** Các tiến trình Sentinel liên tục kiểm tra tình trạng của các node Master và Slave.
+    *   **Notification (Thông báo):** Thông báo cho quản trị viên hoặc các ứng dụng khác khi có sự cố xảy ra với các node Redis.
+    *   **Automatic Failover (Tự động chuyển đổi dự phòng):** Nếu Sentinel xác định Master không còn hoạt động (down), nó sẽ khởi động quá trình failover:
+        1.  Bầu chọn một Slave phù hợp nhất từ các Slave của Master đã chết.
+        2.  Thăng cấp Slave được chọn thành Master mới.
+        3.  Cấu hình các Slave còn lại để replicate từ Master mới.
+        4.  Cập nhật cấu hình để các ứng dụng client biết địa chỉ của Master mới.
+    *   **Configuration Provider (Cung cấp cấu hình):** Client kết nối đến Sentinel để hỏi địa chỉ của Master hiện tại, thay vì hardcode địa chỉ Master trong cấu hình client.
+*   **Kiến trúc:** Sentinel thường được triển khai dưới dạng một cụm gồm ít nhất 3 tiến trình Sentinel chạy trên các máy chủ/VM khác nhau để tránh single point of failure cho chính hệ thống giám sát. Các Sentinel giao tiếp với nhau để đạt được sự đồng thuận (quorum) trước khi thực hiện failover.
+*   **So sánh với Redis Cluster:** Sentinel tập trung vào high availability cho Master-Slave, không cung cấp data sharding. Redis Cluster cung cấp cả high availability và data sharding tích hợp sẵn.
+
+# 6. Các thao tác Redis cơ bản
+
+*   **General:**
+    - `DEL key`: Xóa một key.  
+    **Độ phức tạp**: O(N), với N là số lượng key.
+
+    - `EXISTS key`: Kiểm tra sự tồn tại của key.  
+    **Độ phức tạp**: O(1).
+
+    - `EXPIRE key seconds`: Đặt thời gian hết hạn cho key (tính bằng giây).  
+    **Độ phức tạp**: O(1).
+
+    - `TTL key`: Lấy thời gian sống còn lại của key (tính bằng giây).  
+    **Độ phức tạp**: O(1).
+
+    - `FLUSHDB`: Xóa tất cả key trong database hiện tại.  
+    **Độ phức tạp**: O(N).
+
+*   **String:**
+    - `SET key value`: Gán giá trị cho key.  
+    **Độ phức tạp**: O(1).
+
+    - `GET key`: Lấy giá trị của key.  
+    **Độ phức tạp**: O(1).
+
+    - `INCR key`: Tăng giá trị số nguyên của key lên 1.  
+    **Độ phức tạp**: O(1).
+
+    - `DECR key`: Giảm giá trị số nguyên của key đi 1.  
+    **Độ phức tạp**: O(1).
+
+*   **List:**
+    - `LPUSH key element`: Thêm một phần tử vào đầu danh sách.  
+    **Độ phức tạp**: O(1).
+
+    - `RPUSH key element`: Thêm một phần tử vào cuối danh sách.  
+    **Độ phức tạp**: O(1).
+
+    - `LPOP key`: Xóa và trả về phần tử đầu tiên của danh sách.  
+    **Độ phức tạp**: O(1).
+
+    - `GET key`: Lấy phần tử ngẫu nhiên trong danh sách.
+    **Độ phức tạp**: O(N). 
+
+    - `RPOP key`: Xóa và trả về phần tử cuối cùng của danh sách.  
+    **Độ phức tạp**: O(1).
+
+    - `LLEN key`: Lấy độ dài (số phần tử) của danh sách.  
+    **Độ phức tạp**: O(1).
+
+*   **Set:**
+    - `SADD key member`: Thêm một phần tử vào set.  
+    **Độ phức tạp**: O(1).
+
+    - `SREM key member`: Xóa một phần tử khỏi set.  
+    **Độ phức tạp**: O(1).
+
+    - `SMEMBERS key`: Lấy tất cả các phần tử trong set.  
+    **Độ phức tạp**: O(N), với N là số phần tử trong set.
+
+*   **Hash:**
+    - `HSET key field value`: Gán giá trị cho một field trong hash.  
+    **Độ phức tạp**: O(1).
+
+    - `HGET key field`: Lấy giá trị của một field trong hash.  
+    **Độ phức tạp**: O(1).
+
+    - `HGETALL key`: Lấy tất cả các cặp field-value trong hash.  
+    **Độ phức tạp**: O(N), với N là số lượng field.
+
+*   **Sorted Set (ZSet):**
+    - `ZADD key score member`: Thêm một phần tử với điểm số vào sorted set.  
+    **Độ phức tạp**: O(log(N)).
+
+    - `ZREM key member`: Xóa một phần tử khỏi sorted set.  
+    **Độ phức tạp**: O(log(N)).
+
+    - `ZRANGE key start stop`: Lấy các phần tử trong khoảng rank.  
+    **Độ phức tạp**: O(log(N) + M), với M là số phần tử được trả về.
+
+    - `ZRANGE key member`
