@@ -294,3 +294,89 @@ Redis cung cấp các cơ chế để tăng cường tính sẵn sàng (high ava
 
     *   `ZRANK key member`: Lấy thứ hạng (rank, bắt đầu từ 0) của phần tử (sắp xếp tăng dần theo score).
     **Độ phức tạp**: O(log(N)), với N là số phần tử trong sorted set.
+
+## 7. Các mô hình caching phổ biến 
+
+Khi sử dụng Redis làm cache, có nhiều chiến lược khác nhau để quản lý dữ liệu giữa ứng dụng, cache (Redis), và database chính.
+
+### Cache-Aside (Lazy Loading)
+
+Đây là mô hình phổ biến nhất, trong đó ứng dụng chịu trách nhiệm chính trong việc quản lý cache.
+
+#### Cách hoạt động:
+1. Ứng dụng kiểm tra cache (Redis) khi cần dữ liệu.
+2. Nếu dữ liệu có trong cache (**cache hit**), ứng dụng sử dụng dữ liệu đó.
+3. Nếu dữ liệu không có trong cache (**cache miss**), ứng dụng truy vấn từ database chính, sau đó lưu dữ liệu vào cache để sử dụng cho các lần truy cập sau.
+
+#### Ưu điểm:
+- Dễ triển khai và không phụ thuộc vào cache.
+- Cache chỉ chứa dữ liệu được truy cập, giúp tiết kiệm bộ nhớ.
+
+#### Nhược điểm:
+- Có độ trễ cao hơn trong lần truy cập đầu tiên (**cache miss**).
+- Dữ liệu trong cache có thể không đồng bộ với database nếu không có cơ chế làm mới hoặc xóa cache.
+
+#### Trường hợp sử dụng:
+- Các ứng dụng đọc dữ liệu thường xuyên nhưng ghi dữ liệu ít.
+- Các hệ thống không yêu cầu dữ liệu trong cache phải luôn đồng bộ với database.
+
+### Write-Through Cache
+
+Đây là mô hình trong đó mọi thao tác ghi dữ liệu đều thực hiện cả vào cache lẫn database đồng thời. 
+
+#### Cách hoạt động: 
+1. Khi ứng dụng ghi dữ liệu mới (create/update), nó sẽ ghi vào cache trước. 
+2. Sau đó, dữ liệu cũng được ghi xuống database ngay lập tức. 
+
+#### Ưu điểm: 
+- Cache và Database luôn đồng bộ.
+- Tránh cache miss khi đọc dữ liệu ngay cả sau khi ghi.
+
+#### Nhược điểm: 
+- Độ trễ cao hơn vì phải ghi đồng thời 2 nơi.
+- Nếu cache bị lỗi, có thể ảnh hưởng đến việc ghi dữ liệu. 
+
+#### Trường hợp sử dụng: 
+- Các ứng dụng yêu cầu đọc dữ liệu ngay sau khi ghi.
+- Trường hợp dữ liệu thay đổi thường xuyên và cần đồng bộ tức thì.
+
+### Write-Behind(Write-Back) Cache
+
+Trong mô hình này, khi dữ liệu được ghi vào cache thì việc ghi vào database sẽ trì hoãn và thực hiện sau một khoảng thời gian, thường là theo batch.
+
+#### Cách hoạt động: 
+1. Ghi dữ liệu vào cache.
+2. Một tiến trình nền sẽ ghi dữ liệu từ cache xuống database sau đó.
+
+#### Ưu điểm: 
+- Ghi nhanh hơn vì không cần chờ database.
+- Tối ưu hiệu suất cho hệ thống ghi dữ liệu thường xuyên.
+
+#### Nhược điểm: 
+- Nguy cơ mất dữ liệu nếu hệ thống sập trước khi dữ liệu được ghi xuống database. 
+- Độ phức tạp cao hơn, cần cơ chế đảm bảo đồng bộ. 
+
+#### Trường hợp sử dụng: 
+- Các hệ thống chịu tải ghi cao(như ghi log, sensor data).
+- Không yêu cầu dữ liệu ghi phải phản ánh ngay lập tức trong database. 
+
+### Read-Through Cache
+Mô hình này tương tự với Cache-Aside nhưng ứng dụng không trực tiếp truy cập database khi cache miss. Thay vào đó, cache sẽ tự động truy vấn dữ liệu từ database nếu không có dữ liệu sẵn. 
+
+#### Cách hoạt động:
+1. Ứng dụng gọi `Get()` từ cache.
+2. Nếu cache miss, cache layẻ tự động gọi xuống database, lấy dữ liệu, lưu lại và trả về kết quả cho ứng dụng.
+
+#### Ưu điểm:
+- Đơn giản hóa logic ứng dụng - chỉ cần gọi cache là đủ. 
+- Quản lý cache tập trung, dễ kiểm soát TTL và refresh.
+
+#### Nhược điểm: 
+- Cần xây dựng lớp cache phức tạp hơn (cache phải biết truy cập database).
+- Không linh hoạt nếu có nhiều nguồn dữ liệu.
+
+#### Trường hợp sử dụng: 
+- Khi muốn trừu tượng hóa việc đọc dữ liệu, để ứng dụng không cần lo kiểm tra cache/database.
+- Hệ thống có logic đọc dữ liệu đơn giản và muốn tối ưu hóa kiến trúc. 
+
+
