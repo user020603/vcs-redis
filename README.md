@@ -212,7 +212,38 @@ Redis cung cấp các cơ chế để tăng cường tính sẵn sàng (high ava
 *   **Kiến trúc:** Sentinel thường được triển khai dưới dạng một cụm gồm ít nhất 3 tiến trình Sentinel chạy trên các máy chủ/VM khác nhau để tránh single point of failure cho chính hệ thống giám sát. Các Sentinel giao tiếp với nhau để đạt được sự đồng thuận (quorum) trước khi thực hiện failover.
 *   **So sánh với Redis Cluster:** Sentinel tập trung vào high availability cho Master-Slave, không cung cấp data sharding. Redis Cluster cung cấp cả high availability và data sharding tích hợp sẵn.
 
-# 6. Các thao tác Redis cơ bản
+## 6. Cơ chế tổ chức bộ nhớ trong Redis
+
+Redis cực kỳ chú trọng đến việc sử dụng bộ nhớ hiệu quả.
+
+*   **Đối tượng Redis (Redis Object):** Mọi key và value trong Redis được biểu diễn dưới dạng `redisObject`. Cấu trúc này chứa thông tin như:
+    *   `type`: Kiểu dữ liệu (string, list, set, hash, zset).
+    *   `encoding`: Cách biểu diễn dữ liệu cụ thể trong bộ nhớ (ví dụ: string có thể là `raw` hoặc `int`; list có thể là `ziplist` hoặc `linkedlist`). Redis chọn encoding tối ưu dựa trên kích thước và loại dữ liệu.
+    *   `lru`: Thông tin cho thuật toán Least Recently Used (dùng cho eviction khi bộ nhớ đầy).
+    *   `refcount`: Đếm số tham chiếu đến đối tượng (dùng cho quản lý bộ nhớ).
+    *   `ptr`: Con trỏ đến dữ liệu thực tế.
+
+*   **Tối ưu hóa Encoding:** Redis sử dụng các cấu trúc dữ liệu đặc biệt, tiết kiệm bộ nhớ cho các collection nhỏ:
+    *   **`int` encoding:** Lưu số nguyên trực tiếp thay vì dạng chuỗi nếu giá trị nằm trong phạm vi nhất định.
+    *   **`embstr` encoding:** Cho các chuỗi ngắn, `redisObject` và dữ liệu chuỗi được cấp phát trong một khối bộ nhớ liền kề, giảm phân mảnh và tăng hiệu quả cache.
+    *   **`ziplist`:** Một cấu trúc dữ liệu được mã hóa đặc biệt, lưu trữ danh sách (List), hash (Hash), hoặc sorted set (ZSet) nhỏ một cách tuần tự trong một khối bộ nhớ liên tục. Nó tiết kiệm bộ nhớ hơn so với `linkedlist`, `hashtable`, hoặc `skiplist` nhưng có thể tốn CPU hơn cho các thao tác cập nhật/xóa ở giữa. Redis tự động chuyển đổi sang encoding hiệu quả hơn (`linkedlist`, `hashtable`, `skiplist`) khi collection vượt quá ngưỡng kích thước hoặc số lượng phần tử nhất định (cấu hình qua các tham số `*-max-ziplist-entries` và `*-max-ziplist-value`).
+    *   **`intset`:** Dùng cho Set chỉ chứa các số nguyên. Lưu trữ các số nguyên đã sắp xếp trong một mảng liên tục, rất tiết kiệm bộ nhớ. Tự động chuyển sang `hashtable` nếu thêm phần tử không phải số nguyên hoặc set quá lớn.
+    *   **`skiplist`:** Cấu trúc dữ liệu chính được sử dụng cho Sorted Set (cùng với một hash table để map member sang score). Cho phép tìm kiếm, thêm, xóa với độ phức tạp O(log N).
+
+*   **Quản lý bộ nhớ (Memory Allocation):** Redis thường sử dụng các trình cấp phát bộ nhớ chuẩn như `malloc` (thường là `jemalloc` hoặc `tcmalloc` trên Linux, được tối ưu cho đa luồng và giảm phân mảnh) để quản lý heap.
+*   **Memory Eviction:** Khi bộ nhớ đạt đến giới hạn `maxmemory` được cấu hình, Redis có thể loại bỏ (evict) các key để giải phóng không gian cho dữ liệu mới. Các chính sách eviction phổ biến bao gồm:
+    *   `volatile-lru`: Xóa key ít được sử dụng gần đây nhất trong số các key có đặt `expire`.
+    *   `allkeys-lru`: Xóa key ít được sử dụng gần đây nhất trong toàn bộ keyspace.
+    *   `volatile-lfu`: Xóa key ít được sử dụng thường xuyên nhất (Least Frequently Used) trong số các key có `expire`.
+    *   `allkeys-lfu`: Xóa key ít được sử dụng thường xuyên nhất trong toàn bộ keyspace.
+    *   `volatile-random`: Xóa key ngẫu nhiên trong số các key có `expire`.
+    *   `allkeys-random`: Xóa key ngẫu nhiên trong toàn bộ keyspace.
+    *   `volatile-ttl`: Xóa key có thời gian sống (TTL) còn lại ngắn nhất.
+    *   `noeviction`: Không xóa key, trả về lỗi khi bộ nhớ đầy.
+
+Việc lựa chọn cấu trúc dữ liệu và encoding phù hợp, cùng với chính sách eviction hợp lý, là rất quan trọng để tối ưu hóa việc sử dụng bộ nhớ và hiệu năng của Redis.
+
+## 7. Các thao tác Redis cơ bản
 
 *   **General:**
     - `DEL key`: Xóa một key.  
@@ -295,7 +326,7 @@ Redis cung cấp các cơ chế để tăng cường tính sẵn sàng (high ava
     *   `ZRANK key member`: Lấy thứ hạng (rank, bắt đầu từ 0) của phần tử (sắp xếp tăng dần theo score).
     **Độ phức tạp**: O(log(N)), với N là số phần tử trong sorted set.
 
-## 7. Các mô hình caching phổ biến 
+## 9. Các mô hình caching phổ biến 
 
 Khi sử dụng Redis làm cache, có nhiều chiến lược khác nhau để quản lý dữ liệu giữa ứng dụng, cache (Redis), và database chính.
 
